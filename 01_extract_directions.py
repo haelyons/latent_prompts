@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 """
-01_extract_directions.py
-
-Extracts sycophancy direction vectors using the methodology from:
-"Sycophancy Is Not One Thing: Causal Separation of Sycophantic Behaviors in LLMs"
-
-This script aggregates across 9 factorial datasets via SVD, matching the paper's
-methodology for extracting generalizable (not template-specific) directions.
-
 Datasets used:
 - math_factorial, claims_factorial, companies_factorial
 - cities_pos_factorial, cities_neg_factorial
@@ -19,8 +11,7 @@ Behaviors extracted:
 - GA (Genuine Agreement): ga=1 vs ga=0, where user_claim_is_correct=True  
 - SyPr (Sycophantic Praise): pr=1 (positive praise) vs pr=0 (neutral/negated)
 
-Usage:
-    python 01_extract_directions.py
+To run: python 01_extract_directions.py
 """
 
 import sys
@@ -35,8 +26,22 @@ import numpy as np
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from config import (
+    MODEL_ID,
+    EXTRACTION_LAYER,
+    N_PAIRS_PER_DATASET,
+    FACTORIAL_DATASETS,
+    FACTORIAL_DATA_DIR,
+    DISENTANGLE_DATA_PATH,
+    DIRECTIONS_DIR,
+    VALIDATION_SPLIT,
+    MIN_AUROC_THRESHOLD,
+    SEED,
+    BEHAVIORS,
+)
+
 # Add disentangle-sycophancy to path for utilities
-DISENTANGLE_PATH = Path(__file__).parent / "disentangle-sycophancy"
+DISENTANGLE_PATH = DISENTANGLE_DATA_PATH.parent
 sys.path.insert(0, str(DISENTANGLE_PATH / "src"))
 
 try:
@@ -46,35 +51,14 @@ except ImportError:
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
-MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16
 
-# Layer 24 is where SyA and GA should start to disentangle (for 32-layer model)
-LAYERS = [24]
+# Layer for extraction (from config)
+LAYERS = [EXTRACTION_LAYER]
 
-# Pairs per dataset (smaller since we aggregate across 9 datasets)
-N_PAIRS_PER_DATASET = 150
-
-# All 9 factorial datasets to aggregate
-FACTORIAL_DATASETS = [
-    "math_factorial.json",
-    "claims_factorial.json",
-    "companies_factorial.json",
-    "cities_pos_factorial.json",
-    "cities_neg_factorial.json",
-    "larger_than_factorial.json",
-    "smaller_than_factorial.json",
-    "sp_en_trans_factorial.json",
-    "counterfactual_factorial.json",
-]
-
-DATA_DIR = DISENTANGLE_PATH / "data" / "factorial"
-OUTPUT_DIR = "directions"
-
-VALIDATION_SPLIT = 0.2
-MIN_AUROC_THRESHOLD = 0.6
-SEED = 42
+DATA_DIR = FACTORIAL_DATA_DIR
+OUTPUT_DIR = str(DIRECTIONS_DIR)
 
 
 def load_all_factorial_datasets() -> Dict[str, List[Dict]]:
@@ -311,14 +295,11 @@ def main():
     np.random.seed(SEED)
     torch.manual_seed(SEED)
     
-    print("=" * 60)
-    print("MULTI-DATASET SVD DIRECTION EXTRACTION")
-    print("=" * 60)
     print(f"Model: {MODEL_ID}")
     print(f"Layers: {LAYERS}")
     print(f"Pairs per dataset: {N_PAIRS_PER_DATASET}")
     print(f"Datasets: {len(FACTORIAL_DATASETS)}")
-    print("=" * 60 + "\n")
+    print(f"Output dir: {OUTPUT_DIR}")
     
     # Load all datasets
     all_datasets = load_all_factorial_datasets()
@@ -333,14 +314,11 @@ def main():
         "sypr": build_sypr_pairs_from_dataset,
     }
     
-    # Extract directions
     directions = {}
     per_dataset_directions = {}
     
     for layer in LAYERS:
-        print(f"\n{'='*40}")
-        print(f"LAYER {layer}")
-        print(f"{'='*40}")
+        print(f"\nl:{layer}")
         
         for behavior in ["sya", "ga", "sypr"]:
             print(f"\n  Extracting {behavior.upper()} directions from each dataset...")
@@ -372,11 +350,6 @@ def main():
             aggregated = aggregate_directions_svd(dataset_directions)
             
             directions.setdefault(behavior, {})[layer] = aggregated
-    
-    # Validation on combined data
-    print("\n" + "=" * 40)
-    print("VALIDATION")
-    print("=" * 40)
     
     # Combine all datasets for validation
     all_data = []
@@ -413,14 +386,12 @@ def main():
             status = "✓" if auroc >= MIN_AUROC_THRESHOLD else "⚠"
             print(f"  {behavior.upper()} layer {layer}: AUROC = {auroc:.4f} {status}")
     
-    # Orthogonality check
     print(f"\nOrthogonality (layer {LAYERS[0]}):")
     ortho = check_orthogonality(directions, LAYERS[0])
     print(f"  SyA-GA cosine:   {ortho['sya_ga']:+.4f}")
     print(f"  SyA-SyPr cosine: {ortho['sya_sypr']:+.4f}")
     print(f"  GA-SyPr cosine:  {ortho['ga_sypr']:+.4f}")
     
-    # Save directions
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     behavior_descriptions = {
@@ -463,34 +434,6 @@ def main():
             torch.save(direction_data, filepath)
             print(f"  Saved: {filename}")
     
-    # Save combined file
-    total_pairs_all = len(all_datasets) * N_PAIRS_PER_DATASET
-    count_str_all = format_sample_count(total_pairs_all)
-    combined_path = os.path.join(OUTPUT_DIR, f"all_directions_layer{LAYERS[0]}_n{count_str_all}_svd.pt")
-    combined_dict = {
-        "model_id": MODEL_ID,
-        "layers": LAYERS,
-        "n_datasets": len(all_datasets),
-        "datasets_used": list(all_datasets.keys()),
-        "behaviors": ["sya", "ga", "sypr"],
-        "directions": {
-            behavior: {layer: vec.clone() for layer, vec in layer_dict.items()}
-            for behavior, layer_dict in directions.items()
-        },
-        "per_dataset_directions": per_dataset_directions,
-        "behavior_descriptions": behavior_descriptions,
-        "validation": {
-            "auroc": auroc_results,
-            "orthogonality": ortho,
-        },
-        "method": "svd_aggregation",
-    }
-    torch.save(combined_dict, combined_path)
-    print(f"  Saved combined: {os.path.basename(combined_path)}")
-    
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
     print(f"Datasets aggregated: {len(all_datasets)}")
     print(f"Total pairs processed: ~{len(all_datasets) * N_PAIRS_PER_DATASET * 3}")
     for behavior in ["sya", "ga", "sypr"]:

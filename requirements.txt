@@ -1,26 +1,18 @@
-# Sycophancy Direction Extraction & Measurement
 # Python >= 3.10 required
-
-# Core ML dependencies
 torch>=2.7.0
 torchvision>=0.18.0  # Must match torch version, install in user space
 transformers>=4.40.0
 accelerate>=1.0.0
-
-# Data processing
 # Pin to NumPy 1.x for compatibility with system packages (scipy, tensorflow)
 numpy>=1.24.0,<2.0
+Pillow>=9.1.0  # Required for transformers image_utils (PIL.Image.Resampling)
+jinja2>=3.1.0  # Required for chat template rendering
+flask>=3.0.0
 pandas>=2.0.0
 tqdm>=4.65.0
-
-# Validation & metrics
 scikit-learn>=1.3.0
 scipy>=1.11.0  # Required for NumPy 2.x compatibility
-
-# Visualization (for 03_measure_per_token.py)
 matplotlib>=3.7.0
 
 # IMPORTANT: Install torch with CUDA support FIRST:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-# Then install remaining requirements:
-#   pip install -r requirements.txt

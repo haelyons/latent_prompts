@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-02_measure_generation.py
-
-Measures sycophancy activation during model generation.
+We measure activations during model generation, answering the
+question: at the last token position - which captures a broad 
+view of the relevant activations - how "close" are we to the 
+disentagled sycophancy subspaces? 
 
 This script:
 1. Loads pre-computed sycophancy directions from 01_extract_directions.py
@@ -11,28 +12,22 @@ This script:
 4. Computes cosine similarity with each sycophancy direction
 5. Reports how strongly the generation activates each behavior
 
-The key insight: we measure activations in the GENERATED OUTPUT, not the prompt.
-This tells us "how sycophantic was the model's actual response?"
-
-Usage:
-    python 02_measure_generation.py
-
-Requires:
-    directions/sycophancy_directions.pt (from 01_extract_directions.py)
+To use: python 02_measure_generation.py
+Requires sycophancy directions: directions/{sya,ga,sypr}_layer{N}_*.pt (from 01_extract_directions.py)
 """
 
 import torch
+from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from typing import Optional
-
-# CONFIGURATION (from shared config)
+from typing import Dict
 
 from config import (
     MODEL_ID, 
     DEFAULT_MEASURE_LAYER, 
-    DIRECTIONS_PATH,
+    DIRECTIONS_DIR,
     MAX_NEW_TOKENS,
     SCORE_THRESHOLDS,
+    BEHAVIORS,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,30 +36,58 @@ DTYPE = torch.bfloat16
 # Which layer to use for measurement
 MEASURE_LAYER = DEFAULT_MEASURE_LAYER
 
-# =============================================================================
-# LOAD DIRECTIONS
-# =============================================================================
+def find_direction_file(behavior: str, layer: int, directions_dir: Path) -> Path:
+    """Find the direction file for a given behavior and layer."""
+    pattern = f"{behavior}_layer{layer}_*.pt"
+    matches = list(directions_dir.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"No direction file found for {behavior} at layer {layer} in {directions_dir}")
+    # Return the most recent one if multiple exist
+    return max(matches, key=lambda p: p.stat().st_mtime)
+
+
+def load_directions(layer: int, directions_dir: Path = DIRECTIONS_DIR) -> Dict[str, dict]:
+    """
+    Load individual direction files for each behavior.
+    
+    Returns:
+        Dict with keys 'sya', 'ga', 'sypr', each containing:
+            - 'direction': the direction tensor (normalized)
+            - 'description': human-readable description
+            - 'auroc': validation AUROC score
+            - 'metadata': full saved dict
+    """
+    directions = {}
+    
+    for behavior in ["sya", "ga", "sypr"]:
+        filepath = find_direction_file(behavior, layer, directions_dir)
+        saved = torch.load(str(filepath), weights_only=False)
+        
+        directions[behavior] = {
+            "direction": saved["direction"],
+            "description": saved["description"],
+            "auroc": saved.get("auroc", None),
+            "metadata": saved,
+        }
+        print(f"  Loaded {behavior.upper()}: {filepath.name} (AUROC={saved.get('auroc', 'N/A'):.4f})")
+    
+    return directions
+
 
 print("Loading sycophancy directions...")
-saved = torch.load(str(DIRECTIONS_PATH), weights_only=False)
+loaded_directions = load_directions(MEASURE_LAYER)
 
-directions = saved["directions"]
-behaviors = saved["behaviors"]
-descriptions = saved["behavior_descriptions"]
+# Extract direction vectors and descriptions
+sya_dir = loaded_directions["sya"]["direction"]
+ga_dir = loaded_directions["ga"]["direction"]
+sypr_dir = loaded_directions["sypr"]["direction"]
 
-print(f"Loaded directions for: {behaviors}")
-print(f"Available layers: {list(directions['sya'].keys())}")
-
-# Get directions at our measurement layer
-sya_dir = directions["sya"][MEASURE_LAYER]
-ga_dir = directions["ga"][MEASURE_LAYER]
-sypr_dir = directions["sypr"][MEASURE_LAYER]
+descriptions = {
+    behavior: data["description"] 
+    for behavior, data in loaded_directions.items()
+}
 
 print(f"\nUsing layer {MEASURE_LAYER} for measurement")
-
-# =============================================================================
-# LOAD MODEL WITH ACTIVATION HOOKS
-# =============================================================================
 
 print(f"\nLoading model: {MODEL_ID}")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -91,11 +114,6 @@ def make_hook(layer_idx: int):
 # Register hook on our target layer
 handle = model.model.layers[MEASURE_LAYER].register_forward_hook(make_hook(MEASURE_LAYER))
 print(f"Registered activation hook on layer {MEASURE_LAYER}")
-
-
-# =============================================================================
-# CORE MEASUREMENT FUNCTION
-# =============================================================================
 
 def measure_sycophancy_in_generation(
     prompt: str,
@@ -176,15 +194,15 @@ def measure_sycophancy_in_generation(
 def print_results(result: dict):
     print("Sycophancy measurement...")
     
-    print(f"\n📝 PROMPT:")
+    print(f"\nPrompt:")
     print(f"   {result['prompt']}")
     
-    print(f"\n🤖 GENERATED RESPONSE:")
+    print(f"\nCompletion:")
     print(f"   {result['generated_text'][:500]}...")
     if len(result['generated_text']) > 500:
         print(f"   [truncated, {result['n_generated_tokens']} tokens total]")
     
-    print(f"\n📊 SYCOPHANCY SCORES (cosine similarity with direction):")
+    print(f"\nSycophancy scores (cosine similarity with direction):")
     print(f"   Range: -1.0 (opposite) to +1.0 (aligned)")
     print()
     
@@ -207,7 +225,6 @@ def print_results(result: dict):
         print(f"          ({desc})")
         print()
     
-    print("="*70)
 
 
 TEST_PROMPTS = [
@@ -247,7 +264,6 @@ for i, prompt in enumerate(TEST_PROMPTS, 1):
     print_results(result)
     all_results.append(result)
 
-# Summary table
 print(f"{'Prompt (truncated)':<50} {'SyA':>8} {'GA':>8} {'SyPr':>8}")
 
 for result in all_results:
@@ -255,7 +271,6 @@ for result in all_results:
     s = result['scores']
     print(f"{prompt_short:<50} {s['sya']:>+8.3f} {s['ga']:>+8.3f} {s['sypr']:>+8.3f}")
 
-print("-"*70)
 print("\nInterpretation:")
 print("  - Higher SyA score = generation exhibits sycophantic agreement")
 print("  - Higher GA score = generation exhibits genuine agreement")

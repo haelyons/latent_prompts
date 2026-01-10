@@ -1,33 +1,34 @@
-"""
-config.py
-
-Shared configuration for sycophancy measurement experiments.
-
-Based on methodology from:
-"Sycophancy Is Not One Thing: Causal Separation of Sycophantic Behaviors in LLMs"
-"""
-
 from pathlib import Path
 
 MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
-MODEL_LAYERS = 32  # Total layers in Llama 3.1 8B
+MODEL_LAYERS = 32  # layers in Llama 3.1 8B
 
-# Middle layers work best per paper (layers 12-20 are optimal)
-EXTRACTION_LAYERS = [12, 14, 16, 18, 20]
-DEFAULT_MEASURE_LAYER = 16  # Central layer for single-layer measurement
+# Layer 24 is where SyA and GA disentangle (per paper analysis for 32-layer model)
+EXTRACTION_LAYER = 24
+DEFAULT_MEASURE_LAYER = 24
 
-N_CONTRASTIVE_PAIRS = 750  # Paper uses ~500-1000
+# Pairs per dataset (aggregated across 9 datasets via SVD)
+N_PAIRS_PER_DATASET = 150
 
 SEED = 42
 
 # Base path to disentangle-sycophancy data
 DISENTANGLE_DATA_PATH = Path(__file__).parent / "disentangle-sycophancy" / "data"
+FACTORIAL_DATA_DIR = DISENTANGLE_DATA_PATH / "factorial"
 
-# Primary dataset for direction extraction (per paper)
-FACTORIAL_DATA_PATH = DISENTANGLE_DATA_PATH / "factorial" / "math_factorial.json"
+FACTORIAL_DATASETS = [
+    "math_factorial.json",
+    "claims_factorial.json",
+    "companies_factorial.json",
+    "cities_pos_factorial.json",
+    "cities_neg_factorial.json",
+    "larger_than_factorial.json",
+    "smaller_than_factorial.json",
+    "sp_en_trans_factorial.json",
+    "counterfactual_factorial.json",
+]
 
-# Alternative datasets (can be swapped in for different experiments)
-CLAIMS_FACTORIAL_PATH = DISENTANGLE_DATA_PATH / "factorial" / "claims_factorial.json"
+# Additional data paths
 PRAISE_DATA_PATH = DISENTANGLE_DATA_PATH / "praise.json"
 TRUTHFULQA_PATH = DISENTANGLE_DATA_PATH / "truthfulqa.jsonl"
 
@@ -67,12 +68,15 @@ BEHAVIOR_LABEL_MAP = {
 }
 
 DIRECTIONS_DIR = Path("directions")
-DIRECTIONS_PATH = DIRECTIONS_DIR / "sycophancy_directions.pt"
 
-VALIDATION_SPLIT = 0.2  # Hold out 20% for AUROC validation
-MIN_AUROC_THRESHOLD = 0.6  # Warn if direction AUROC is below this
-VALIDATION_SAMPLES = 500  # Number of samples for AUROC computation
+# Individual direction files pattern: {behavior}_layer{layer}_n{count}_svd.pt
+# ex: sya_layer24_n1k3_svd.pt, ga_layer24_n1k3_svd.pt, sypr_layer24_n1k3_svd.pt
 
+VALIDATION_SPLIT = 0.2  # 20% holdout for AUROC validation
+MIN_AUROC_THRESHOLD = 0.6  # warn if direction AUROC is below this
+VALIDATION_SAMPLES = 500  # number of samples for AUROC computation
+
+# maybe a bit low here?
 MAX_NEW_TOKENS = 100
 
 SCORE_THRESHOLDS = {
