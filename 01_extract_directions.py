@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+Extract disentangled sycophancy directions using the paper's DiffMean approach.
+
 Datasets used:
 - math_factorial, claims_factorial, companies_factorial
 - cities_pos_factorial, cities_neg_factorial
@@ -9,7 +11,12 @@ Datasets used:
 Behaviors extracted:
 - SyA (Sycophantic Agreement): syc=1 vs syc=0, where user_claim_is_correct=False
 - GA (Genuine Agreement): ga=1 vs ga=0, where user_claim_is_correct=True  
-- SyPr (Sycophantic Praise): pr=1 (positive praise) vs pr=0 (neutral/negated)
+- SyPr (Sycophantic Praise): pr=1 vs pr=0 (uses pr field directly per paper)
+
+Method: Direct label-based DiffMean (paper's approach)
+- Extracts activations from ALL examples
+- Groups by label, computes mean difference
+- Aggregates across datasets via SVD
 
 To run: python 01_extract_directions.py
 """
@@ -19,7 +26,7 @@ import os
 import json
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Set
 
 import torch
 import numpy as np
@@ -54,12 +61,12 @@ except ImportError:
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16
 
-# Layer for extraction (from config)
 LAYERS = [EXTRACTION_LAYER]
 
 DATA_DIR = FACTORIAL_DATA_DIR
 OUTPUT_DIR = str(DIRECTIONS_DIR)
 
+POOL_STRATEGY = "pre_eos"
 
 def load_all_factorial_datasets() -> Dict[str, List[Dict]]:
     """Load all 9 factorial datasets."""
@@ -82,86 +89,6 @@ def load_all_factorial_datasets() -> Dict[str, List[Dict]]:
     return datasets
 
 
-def build_sya_pairs_from_dataset(data: List[Dict], n_pairs: int) -> List[Tuple[str, str]]:
-    """Build SyA contrastive pairs from a single dataset."""
-    user_wrong = [d for d in data if not d.get("user_claim_is_correct", True)]
-    user_wrong_no_praise = [d for d in user_wrong if not d.get("praise_present", False)]
-    
-    pos = [d for d in user_wrong_no_praise if d.get("syc", 0) == 1]
-    neg = [d for d in user_wrong_no_praise if d.get("syc", 0) == 0]
-    
-    if not pos or not neg:
-        return []
-    
-    pairs = []
-    prompt_to_neg = {}
-    for n in neg:
-        prompt_to_neg.setdefault(n["prompt"], []).append(n)
-    
-    random.shuffle(pos)
-    for p in pos:
-        if p["prompt"] in prompt_to_neg and prompt_to_neg[p["prompt"]]:
-            n = prompt_to_neg[p["prompt"]].pop(0)
-            pairs.append((p["prompt"] + p["response"], n["prompt"] + n["response"]))
-            if len(pairs) >= n_pairs:
-                break
-    
-    return pairs
-
-
-def build_ga_pairs_from_dataset(data: List[Dict], n_pairs: int) -> List[Tuple[str, str]]:
-    """Build GA contrastive pairs from a single dataset."""
-    user_correct = [d for d in data if d.get("user_claim_is_correct", False)]
-    user_correct_no_praise = [d for d in user_correct if not d.get("praise_present", False)]
-    
-    pos = [d for d in user_correct_no_praise if d.get("ga", 0) == 1]
-    neg = [d for d in user_correct_no_praise if d.get("ga", 0) == 0]
-    
-    if not pos or not neg:
-        return []
-    
-    pairs = []
-    prompt_to_neg = {}
-    for n in neg:
-        prompt_to_neg.setdefault(n["prompt"], []).append(n)
-    
-    random.shuffle(pos)
-    for p in pos:
-        if p["prompt"] in prompt_to_neg and prompt_to_neg[p["prompt"]]:
-            n = prompt_to_neg[p["prompt"]].pop(0)
-            pairs.append((p["prompt"] + p["response"], n["prompt"] + n["response"]))
-            if len(pairs) >= n_pairs:
-                break
-    
-    return pairs
-
-
-def build_sypr_pairs_from_dataset(data: List[Dict], n_pairs: int) -> List[Tuple[str, str]]:
-    """Build SyPr contrastive pairs from a single dataset."""
-    pos_praise = [d for d in data if d.get("praise_present", False) and not d.get("praise_negated", False)]
-    no_praise = [d for d in data if not d.get("praise_present", False)]
-    
-    if not pos_praise or not no_praise:
-        return []
-    
-    pairs = []
-    neutral_lookup = {}
-    for n in no_praise:
-        key = (n["prompt"], n.get("response_value"))
-        neutral_lookup.setdefault(key, []).append(n)
-    
-    random.shuffle(pos_praise)
-    for p in pos_praise:
-        key = (p["prompt"], p.get("response_value"))
-        if key in neutral_lookup and neutral_lookup[key]:
-            n = neutral_lookup[key].pop(0)
-            pairs.append((p["prompt"] + p["response"], n["prompt"] + n["response"]))
-            if len(pairs) >= n_pairs:
-                break
-    
-    return pairs
-
-
 def load_model_and_tokenizer():
     """Load the model and tokenizer."""
     print(f"\nLoading model: {MODEL_ID}")
@@ -176,42 +103,188 @@ def load_model_and_tokenizer():
     return model, tokenizer
 
 
-def get_last_token_activation(model, tokenizer, text: str, layer: int) -> torch.Tensor:
-    """Extract the hidden state at the last token position for a given layer."""
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+def build_special_token_set(tokenizer) -> Set[int]:
+    """Build set of special token IDs to skip during pooling."""
+    special_ids = set()
+    if hasattr(tokenizer, 'all_special_ids'):
+        special_ids.update(tokenizer.all_special_ids)
+    if tokenizer.eos_token_id is not None:
+        special_ids.add(tokenizer.eos_token_id)
+    if tokenizer.bos_token_id is not None:
+        special_ids.add(tokenizer.bos_token_id)
+    if tokenizer.pad_token_id is not None:
+        special_ids.add(tokenizer.pad_token_id)
+    return special_ids
+
+
+def get_pooled_activation(
+    model, 
+    tokenizer, 
+    text: str, 
+    layer: int,
+    special_ids: Set[int],
+    pool_strategy: str = "pre_eos"
+) -> torch.Tensor:
+    """
+    Extract hidden state at the appropriate token position.
     
+    Paper's approach (Appendix F): "extract h at the end of sentence token 
+    following the response at the post-layernorm residual stream"
+    
+    Args:
+        model: The language model
+        tokenizer: The tokenizer
+        text: Input text (prompt + response)
+        layer: Layer index to extract from
+        special_ids: Set of special token IDs to skip
+        pool_strategy: 'pre_eos' (default) or 'last'
+    
+    Returns:
+        Hidden state tensor at the selected position
+    """
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+    input_ids = inputs.input_ids[0]
+    seq_len = len(input_ids)
+    
+    # Find the appropriate token position
+    if pool_strategy == "pre_eos":
+        # Find EOS position
+        eos_id = tokenizer.eos_token_id
+        eos_positions = (input_ids == eos_id).nonzero(as_tuple=True)[0]
+        
+        if len(eos_positions) > 0:
+            # Use LAST EOS (handles chat templates with multiple turns)
+            idx = eos_positions[-1].item() - 1
+        else:
+            # No EOS found, start from last token
+            idx = seq_len - 1
+        
+        # Skip special tokens going backwards
+        while idx > 0 and input_ids[idx].item() in special_ids:
+            idx -= 1
+            
+    else:  # 'last' strategy
+        # Start from last token
+        idx = seq_len - 1
+        # Skip special tokens going backwards
+        while idx > 0 and input_ids[idx].item() in special_ids:
+            idx -= 1
+    
+    # Ensure valid index
+    idx = max(0, idx)
+    
+    # Extract hidden state
     with torch.no_grad():
         outputs = model(**inputs, output_hidden_states=True)
     
+    # hidden_states[0] = embeddings, hidden_states[layer+1] = after layer `layer`
     hidden_states = outputs.hidden_states[layer + 1]
-    last_token_act = hidden_states[0, -1, :].float().cpu()
+    activation = hidden_states[0, idx, :].float().cpu()
     
-    return last_token_act
+    return activation
 
 
-def compute_diffmean_direction(
-    model, tokenizer, pairs: List[Tuple[str, str]], layer: int, desc: str = ""
-) -> torch.Tensor:
-    """Compute normalized difference-in-means direction."""
-    if not pairs:
-        return None
+def filter_data_for_behavior(data: List[Dict], behavior: str) -> List[Dict]:
+    """
+    Filter dataset for behavior-specific examples.
     
-    pos_activations = []
-    neg_activations = []
+    Per paper:
+    - SyA: Only where user_claim_is_correct=False (user is wrong)
+    - GA: Only where user_claim_is_correct=True (user is correct)
+    - SyPr: All examples (pr field already encodes the label correctly)
+    """
+    if behavior == "sya":
+        # SyA: user must be wrong, exclude praise to isolate agreement
+        return [d for d in data 
+                if not d.get("user_claim_is_correct", True)
+                and not d.get("praise_present", False)]
+    elif behavior == "ga":
+        # GA: user must be correct, exclude praise to isolate agreement
+        return [d for d in data 
+                if d.get("user_claim_is_correct", False)
+                and not d.get("praise_present", False)]
+    elif behavior == "sypr":
+        # SyPr: use ALL examples - pr field correctly encodes:
+        #   pr=1: sycophantic praise (praise_present=True, not negated, positive adjective)
+        #   pr=0: no praise OR negated praise OR neutral phrases
+        return data
+    else:
+        return data
+
+
+def compute_diffmean_direction_label_based(
+    model,
+    tokenizer,
+    data: List[Dict],
+    label_key: str,
+    layer: int,
+    special_ids: Set[int],
+    max_examples: Optional[int] = None,
+    desc: str = ""
+) -> Tuple[torch.Tensor, int, int]:
+    """
+    Compute DiffMean direction using the paper's label-based approach.
     
-    for pos_text, neg_text in tqdm(pairs, desc=desc, leave=False):
-        pos_act = get_last_token_activation(model, tokenizer, pos_text, layer)
-        neg_act = get_last_token_activation(model, tokenizer, neg_text, layer)
-        pos_activations.append(pos_act)
-        neg_activations.append(neg_act)
+    Instead of building explicit pairs, accumulates means across ALL examples
+    grouped by label value.
     
-    pos_mean = torch.stack(pos_activations).mean(dim=0)
-    neg_mean = torch.stack(neg_activations).mean(dim=0)
+    Args:
+        model: The language model
+        tokenizer: The tokenizer
+        data: List of examples with 'prompt', 'response', and label_key fields
+        label_key: Field name for the label (e.g., 'syc', 'ga', 'pr')
+        layer: Layer index to extract from
+        special_ids: Set of special token IDs
+        max_examples: Optional limit on examples per class
+        desc: Description for progress bar
     
+    Returns:
+        (direction, pos_count, neg_count)
+    """
+    # Separate by label
+    pos_examples = [d for d in data if d.get(label_key, 0) == 1]
+    neg_examples = [d for d in data if d.get(label_key, 0) == 0]
+    
+    # Optionally limit examples
+    if max_examples is not None:
+        random.shuffle(pos_examples)
+        random.shuffle(neg_examples)
+        pos_examples = pos_examples[:max_examples]
+        neg_examples = neg_examples[:max_examples]
+    
+    if not pos_examples or not neg_examples:
+        return None, 0, 0
+    
+    # Get hidden dimension from first example
+    sample_text = pos_examples[0]["prompt"] + pos_examples[0]["response"]
+    sample_act = get_pooled_activation(model, tokenizer, sample_text, layer, special_ids, POOL_STRATEGY)
+    hidden_dim = sample_act.shape[0]
+    
+    # Accumulate sums
+    pos_sum = torch.zeros(hidden_dim)
+    neg_sum = torch.zeros(hidden_dim)
+    
+    # Process positive examples
+    for ex in tqdm(pos_examples, desc=f"{desc} pos", leave=False):
+        text = ex["prompt"] + ex["response"]
+        act = get_pooled_activation(model, tokenizer, text, layer, special_ids, POOL_STRATEGY)
+        pos_sum += act
+    
+    # Process negative examples
+    for ex in tqdm(neg_examples, desc=f"{desc} neg", leave=False):
+        text = ex["prompt"] + ex["response"]
+        act = get_pooled_activation(model, tokenizer, text, layer, special_ids, POOL_STRATEGY)
+        neg_sum += act
+    
+    # Compute means
+    pos_mean = pos_sum / len(pos_examples)
+    neg_mean = neg_sum / len(neg_examples)
+    
+    # Direction = mean(pos) - mean(neg), normalized
     direction = pos_mean - neg_mean
     direction = direction / direction.norm()
     
-    return direction
+    return direction, len(pos_examples), len(neg_examples)
 
 
 def aggregate_directions_svd(directions: List[torch.Tensor]) -> torch.Tensor:
@@ -221,14 +294,13 @@ def aggregate_directions_svd(directions: List[torch.Tensor]) -> torch.Tensor:
     Per paper: "normalized and stacked into a matrix M, from which we compute
     an orthonormal basis U via SVD" - then take top principal component.
     """
-    # Filter out None directions
     valid_directions = [d for d in directions if d is not None]
     
     if not valid_directions:
         raise ValueError("No valid directions to aggregate")
     
     # Stack into matrix (hidden_dim x n_datasets)
-    M = torch.stack(valid_directions, dim=1)  # Shape: (D, N)
+    M = torch.stack(valid_directions, dim=1)
     
     # SVD: M = U @ S @ V^T
     U, S, Vt = torch.linalg.svd(M, full_matrices=False)
@@ -246,8 +318,16 @@ def aggregate_directions_svd(directions: List[torch.Tensor]) -> torch.Tensor:
     return principal_direction
 
 
-def compute_auroc(model, tokenizer, direction: torch.Tensor, data: List[Dict], 
-                  label_key: str, layer: int, n_samples: int = 500) -> float:
+def compute_auroc(
+    model,
+    tokenizer,
+    direction: torch.Tensor,
+    data: List[Dict],
+    label_key: str,
+    layer: int,
+    special_ids: Set[int],
+    n_samples: int = 500
+) -> float:
     """Compute AUROC to validate direction quality."""
     from sklearn.metrics import roc_auc_score
     
@@ -258,7 +338,7 @@ def compute_auroc(model, tokenizer, direction: torch.Tensor, data: List[Dict],
     
     for sample in tqdm(samples, desc=f"AUROC {label_key}", leave=False):
         text = sample["prompt"] + sample["response"]
-        activation = get_last_token_activation(model, tokenizer, text, layer)
+        activation = get_pooled_activation(model, tokenizer, text, layer, special_ids, POOL_STRATEGY)
         activation_norm = activation / activation.norm()
         
         score = torch.dot(activation_norm, direction).item()
@@ -297,9 +377,10 @@ def main():
     
     print(f"Model: {MODEL_ID}")
     print(f"Layers: {LAYERS}")
-    print(f"Pairs per dataset: {N_PAIRS_PER_DATASET}")
+    print(f"Max examples per class per dataset: {N_PAIRS_PER_DATASET}")
     print(f"Datasets: {len(FACTORIAL_DATASETS)}")
     print(f"Output dir: {OUTPUT_DIR}")
+    print(f"Pooling strategy: {POOL_STRATEGY}")
     
     # Load all datasets
     all_datasets = load_all_factorial_datasets()
@@ -307,43 +388,62 @@ def main():
     # Load model
     model, tokenizer = load_model_and_tokenizer()
     
-    # Build pair functions for each behavior
-    pair_builders = {
-        "sya": build_sya_pairs_from_dataset,
-        "ga": build_ga_pairs_from_dataset,
-        "sypr": build_sypr_pairs_from_dataset,
+    # Build special token set for pooling
+    special_ids = build_special_token_set(tokenizer)
+    print(f"Special token IDs to skip: {special_ids}")
+    
+    # Behavior configurations
+    # label_key: field in data that contains the binary label
+    behavior_configs = {
+        "sya": {"label_key": "syc", "description": "Sycophantic Agreement - echoing incorrect user claims"},
+        "ga": {"label_key": "ga", "description": "Genuine Agreement - echoing correct user claims"},
+        "sypr": {"label_key": "pr", "description": "Sycophantic Praise - excessive flattery"},
     }
     
     directions = {}
     per_dataset_directions = {}
+    per_dataset_counts = {}
     
     for layer in LAYERS:
-        print(f"\nl:{layer}")
+        print(f"\nLayer {layer}")
         
         for behavior in ["sya", "ga", "sypr"]:
+            config = behavior_configs[behavior]
+            label_key = config["label_key"]
+            
             print(f"\n  Extracting {behavior.upper()} directions from each dataset...")
+            print(f"    Label field: {label_key}")
             
             dataset_directions = []
             per_dataset_directions.setdefault(behavior, {}).setdefault(layer, {})
+            per_dataset_counts.setdefault(behavior, {}).setdefault(layer, {})
             
             for dataset_name, data in all_datasets.items():
-                # Build pairs for this dataset
-                pairs = pair_builders[behavior](data, N_PAIRS_PER_DATASET)
+                # Filter data for this behavior
+                filtered_data = filter_data_for_behavior(data, behavior)
                 
-                if len(pairs) < 10:
-                    print(f"    {dataset_name}: skipped (only {len(pairs)} pairs)")
+                if len(filtered_data) < 20:
+                    print(f"    {dataset_name}: skipped (only {len(filtered_data)} examples after filtering)")
                     continue
                 
-                # Compute direction for this dataset
-                direction = compute_diffmean_direction(
-                    model, tokenizer, pairs, layer,
+                # Compute direction using label-based DiffMean
+                direction, pos_count, neg_count = compute_diffmean_direction_label_based(
+                    model, tokenizer,
+                    filtered_data,
+                    label_key,
+                    layer,
+                    special_ids,
+                    max_examples=N_PAIRS_PER_DATASET,
                     desc=f"    {dataset_name}"
                 )
                 
                 if direction is not None:
                     dataset_directions.append(direction)
                     per_dataset_directions[behavior][layer][dataset_name] = direction
-                    print(f"    {dataset_name}: {len(pairs)} pairs ✓")
+                    per_dataset_counts[behavior][layer][dataset_name] = (pos_count, neg_count)
+                    print(f"    {dataset_name}: pos={pos_count}, neg={neg_count} ✓")
+                else:
+                    print(f"    {dataset_name}: skipped (missing pos or neg examples)")
             
             # Aggregate via SVD
             print(f"  Aggregating {behavior.upper()} via SVD...")
@@ -360,25 +460,26 @@ def main():
     
     print(f"\nComputing AUROC on {len(val_data):,} held-out examples...")
     
-    label_map = {"sya": "syc", "ga": "ga", "sypr": "pr"}
     auroc_results = {}
     
     for behavior in ["sya", "ga", "sypr"]:
-        label_key = label_map[behavior]
+        label_key = behavior_configs[behavior]["label_key"]
         auroc_results[behavior] = {}
         
         for layer in LAYERS:
+            # Filter validation data appropriately
             if behavior == "sya":
                 val_subset = [d for d in val_data if not d.get("user_claim_is_correct", True)]
             elif behavior == "ga":
                 val_subset = [d for d in val_data if d.get("user_claim_is_correct", False)]
-            else:
+            else:  # sypr
                 val_subset = val_data
             
             auroc = compute_auroc(
                 model, tokenizer,
                 directions[behavior][layer],
                 val_subset, label_key, layer,
+                special_ids,
                 n_samples=min(500, len(val_subset))
             )
             auroc_results[behavior][layer] = auroc
@@ -394,12 +495,6 @@ def main():
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    behavior_descriptions = {
-        "sya": "Sycophantic Agreement - echoing incorrect user claims",
-        "ga": "Genuine Agreement - echoing correct user claims", 
-        "sypr": "Sycophantic Praise - excessive flattery",
-    }
-    
     print(f"\nSaving directions...")
     
     def format_sample_count(n: int) -> str:
@@ -413,32 +508,40 @@ def main():
     
     for behavior in ["sya", "ga", "sypr"]:
         for layer in LAYERS:
-            n_datasets = len([d for d in per_dataset_directions[behavior][layer].values() if d is not None])
-            total_pairs = n_datasets * N_PAIRS_PER_DATASET
-            count_str = format_sample_count(total_pairs)
+            # Calculate total examples used
+            counts = per_dataset_counts[behavior][layer]
+            total_pos = sum(c[0] for c in counts.values())
+            total_neg = sum(c[1] for c in counts.values())
+            total_examples = total_pos + total_neg
+            
+            count_str = format_sample_count(total_examples)
             filename = f"{behavior}_layer{layer}_n{count_str}_svd.pt"
             filepath = os.path.join(OUTPUT_DIR, filename)
             
             direction_data = {
                 "direction": directions[behavior][layer],
                 "behavior": behavior,
-                "description": behavior_descriptions[behavior],
+                "description": behavior_configs[behavior]["description"],
                 "layer": layer,
-                "n_pairs": total_pairs,
-                "n_datasets": n_datasets,
+                "n_examples": total_examples,
+                "n_pos": total_pos,
+                "n_neg": total_neg,
+                "n_datasets": len(per_dataset_directions[behavior][layer]),
                 "datasets_used": list(per_dataset_directions[behavior][layer].keys()),
                 "model_id": MODEL_ID,
                 "auroc": auroc_results[behavior][layer],
-                "method": "svd_aggregation",
+                "method": "label_based_diffmean_svd",
+                "pool_strategy": POOL_STRATEGY,
             }
             torch.save(direction_data, filepath)
             print(f"  Saved: {filename}")
     
-    print(f"Datasets aggregated: {len(all_datasets)}")
-    print(f"Total pairs processed: ~{len(all_datasets) * N_PAIRS_PER_DATASET * 3}")
+    print(f"  Datasets aggregated: {len(all_datasets)}")
+    print(f"  Pool strategy: {POOL_STRATEGY}")
     for behavior in ["sya", "ga", "sypr"]:
-        print(f"{behavior.upper()}: AUROC={auroc_results[behavior][LAYERS[0]]:.4f}")
-    print(f"\nSyA-GA separation: {ortho['sya_ga']:+.4f} (lower = better disentanglement)")
+        counts = per_dataset_counts[behavior][LAYERS[0]]
+        total = sum(c[0] + c[1] for c in counts.values())
+        print(f"  {behavior.upper()}: {total} examples, AUROC={auroc_results[behavior][LAYERS[0]]:.4f}")
 
 
 if __name__ == "__main__":

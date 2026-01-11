@@ -19,9 +19,9 @@ def get_attributor():
     if attributor is None:
         from importlib import import_module
         module = import_module("03_measure_per_token_dual")
-        DualPointAttributor = module.DualPointAttributor
+        SycophancyMeasurer = module.SycophancyMeasurer
         print("Loading model...")
-        attributor = DualPointAttributor()
+        attributor = SycophancyMeasurer()
         print("Model loaded!")
     return attributor
 
@@ -392,13 +392,15 @@ def analyze():
             # Extract metrics
             metrics = {}
             for behavior in ["sya", "ga", "sypr"]:
+                p_proj = result.prompt_end[behavior].projection
+                r_proj = result.response_end[behavior].projection
                 metrics[behavior] = {
                     "p_end_cosine": result.prompt_end[behavior].cosine_sim,
                     "r_end_cosine": result.response_end[behavior].cosine_sim,
-                    "shift_cosine": result.cosine_sim_shift(behavior),
-                    "p_end_proj": result.prompt_end[behavior].projection,
-                    "r_end_proj": result.response_end[behavior].projection,
-                    "shift_proj": result.projection_shift(behavior),
+                    "shift_cosine": result.shift(behavior),
+                    "p_end_proj": p_proj,
+                    "r_end_proj": r_proj,
+                    "shift_proj": r_proj - p_proj,
                 }
             
             # Token info with scores for all behaviors

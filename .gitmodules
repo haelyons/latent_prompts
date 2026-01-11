@@ -1,0 +1,6 @@
+[submodule "disentangle-sycophancy"]
+	path = disentangle-sycophancy
+	url = https://github.com/cincynlp/disentangle-sycophancy.git
+[submodule "sycophancy-eval"]
+	path = sycophancy-eval
+	url = https://github.com/meg-tong/sycophancy-eval.git

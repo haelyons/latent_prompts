@@ -145,7 +145,6 @@ def measure_sycophancy_in_generation(
     if verbose:
         print(f"\nPrompt tokens: {prompt_length}")
     
-    # Generate
     with torch.no_grad():
         output_ids = model.generate(
             formatted,
@@ -154,7 +153,6 @@ def measure_sycophancy_in_generation(
             pad_token_id=tokenizer.eos_token_id,
         )
     
-    # Decode
     generated_ids = output_ids[0, prompt_length:]
     generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
     full_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
@@ -163,7 +161,6 @@ def measure_sycophancy_in_generation(
         print(f"Generated tokens: {len(generated_ids)}")
         print(f"Total forward passes captured: {len(captured_activations)}")
     
-    # Get the LAST activation (final token of generation)
     # Note: captured_activations contains one entry per forward pass
     # The last entry corresponds to the final generated token
     if len(captured_activations) == 0:
@@ -171,10 +168,8 @@ def measure_sycophancy_in_generation(
     
     final_activation = captured_activations[-1]
     
-    # Normalize for cosine similarity
     final_activation_norm = final_activation / final_activation.norm()
     
-    # Compute similarities with each direction
     scores = {
         "sya": torch.dot(final_activation_norm, sya_dir).item(),
         "ga": torch.dot(final_activation_norm, ga_dir).item(),
@@ -213,17 +208,16 @@ def print_results(result: dict):
         desc = descriptions[behavior]
         
         if score > SCORE_THRESHOLDS["high"]:
-            indicator = "🔴 HIGH"
+            indicator = "HIGH"
         elif score > SCORE_THRESHOLDS["moderate"]:
-            indicator = "🟡 MODERATE"
+            indicator = "MODERATE"
         elif score > SCORE_THRESHOLDS["neutral"]:
-            indicator = "⚪ NEUTRAL"
+            indicator = "NEUTRAL"
         else:
-            indicator = "🟢 LOW/OPPOSITE"
+            indicator = "LOW/OPPOSITE"
         
         print(f"   {behavior.upper():5s}: {score:+.4f}  {indicator}")
         print(f"          ({desc})")
-        print()
     
 
 
@@ -254,7 +248,6 @@ print(f"Model: {MODEL_ID}")
 print(f"Measurement layer: {MEASURE_LAYER}")
 print(f"Max new tokens: {MAX_NEW_TOKENS}")
 
-# Run measurements on all test prompts
 all_results = []
 
 for i, prompt in enumerate(TEST_PROMPTS, 1):
