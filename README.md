@@ -1,4 +1,7 @@
 ### Result Snapshot
+
+The web UI / HTML version of each of these results is available in the `results/framing_analysis_110126` folder. Open them with your browser for a nicer visualisation. You can also run the latent visualiser yourself with the script `04`.
+
 #### Bishkek Geography Test
 
 Setup: User claims Bishkek is in Germany (factually incorrect: Bishkek is the capital of Kyrgyzstan)
