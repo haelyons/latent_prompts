@@ -7,6 +7,30 @@ MODEL_LAYERS = 32  # layers in Llama 3.1 8B
 EXTRACTION_LAYER = 24
 DEFAULT_MEASURE_LAYER = 24
 
+MODEL_PROFILES = {
+    "8b": {
+        "model_id": "meta-llama/Llama-3.1-8B-Instruct",
+        "n_layers": 32,
+        "hidden_dim": 4096,
+        "extraction_layer": 24,
+        "candidate_layers": [24],
+        "device_map": "cuda",
+    },
+    "70b": {
+        "model_id": "meta-llama/Llama-3.1-70B-Instruct",
+        "n_layers": 80,
+        "hidden_dim": 8192,
+        "extraction_layer": 60,
+        "candidate_layers": [55, 60, 65],
+        "device_map": "auto",  # 2-GPU sharding via accelerate
+    },
+}
+
+def get_profile(name: str = "8b") -> dict:
+    if name not in MODEL_PROFILES:
+        raise ValueError(f"Unknown model profile: {name!r}. Choose from {list(MODEL_PROFILES)}")
+    return MODEL_PROFILES[name]
+
 # Pairs per dataset (aggregated across 9 datasets via SVD)
 N_PAIRS_PER_DATASET = 150
 
