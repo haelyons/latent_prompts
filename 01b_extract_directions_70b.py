@@ -112,6 +112,7 @@ def compute_diffmean_multilayer(
     special_ids: Set[int],
     max_examples: Optional[int] = None,
     desc: str = "",
+    pool_strategy: str = "eos",
 ) -> Tuple[Dict[int, Optional[torch.Tensor]], int, int]:
     """
     Label-based DiffMean at all candidate layers in one forward pass per
@@ -131,7 +132,7 @@ def compute_diffmean_multilayer(
 
     # Probe hidden dimension
     sample_text = pos_examples[0]["prompt"] + pos_examples[0]["response"]
-    sample_acts = get_pooled_activations(model, tokenizer, sample_text, layers, special_ids)
+    sample_acts = get_pooled_activations(model, tokenizer, sample_text, layers, special_ids, pool_strategy)
     hidden_dim = next(iter(sample_acts.values())).shape[0]
 
     pos_sums = {l: torch.zeros(hidden_dim) for l in layers}
@@ -139,13 +140,13 @@ def compute_diffmean_multilayer(
 
     for ex in tqdm(pos_examples, desc=f"{desc} pos", leave=False):
         text = ex["prompt"] + ex["response"]
-        acts = get_pooled_activations(model, tokenizer, text, layers, special_ids)
+        acts = get_pooled_activations(model, tokenizer, text, layers, special_ids, pool_strategy)
         for l in layers:
             pos_sums[l] += acts[l]
 
     for ex in tqdm(neg_examples, desc=f"{desc} neg", leave=False):
         text = ex["prompt"] + ex["response"]
-        acts = get_pooled_activations(model, tokenizer, text, layers, special_ids)
+        acts = get_pooled_activations(model, tokenizer, text, layers, special_ids, pool_strategy)
         for l in layers:
             neg_sums[l] += acts[l]
 
@@ -157,8 +158,7 @@ def compute_diffmean_multilayer(
 
     return directions, len(pos_examples), len(neg_examples)
 
-
-# SVD aggregation (same as 01, but also returns variance explained)
+# previous version + variance explained
 def aggregate_directions_svd(
     directions: List[torch.Tensor],
 ) -> Tuple[torch.Tensor, float]:
@@ -183,6 +183,7 @@ def compute_auroc_all_layers(
     layers: List[int],
     special_ids: Set[int],
     n_samples: int = 500,
+    pool_strategy: str = "eos",
 ) -> Tuple[Dict[int, float], Dict[int, torch.Tensor]]:
     """
     AUROC for one behavior across all candidate layers, sharing forward
@@ -199,7 +200,7 @@ def compute_auroc_all_layers(
 
     for sample in tqdm(samples, desc=f"AUROC {label_key}", leave=False):
         text = sample["prompt"] + sample["response"]
-        acts = get_pooled_activations(model, tokenizer, text, layers, special_ids)
+        acts = get_pooled_activations(model, tokenizer, text, layers, special_ids, pool_strategy)
         for l in layers:
             act_norm = acts[l] / acts[l].norm()
             scores_by_layer[l].append(torch.dot(act_norm, directions_by_layer[l]).item())
@@ -224,7 +225,6 @@ def compute_auroc_all_layers(
     return aurocs, aligned
 
 
-# Orthogonality
 def check_orthogonality(
     directions: Dict[str, Dict[int, torch.Tensor]], layer: int,
 ) -> Dict[str, float]:
@@ -252,6 +252,11 @@ def parse_args():
         help="Override candidate layers, comma-separated (e.g. 47,55,60,65)",
     )
     parser.add_argument(
+        "--pool-strategy", default="eos",
+        choices=["eos", "pre_eos", "last"],
+        help="Token position for activation extraction (default: eos)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Load and filter data only — no model, no GPU",
     )
@@ -262,6 +267,7 @@ def main():
     args = parse_args()
     profile = get_profile(args.model)
     model_tag = args.model if args.model != "8b" else ""
+    pool_strategy = args.pool_strategy
 
     layers = (
         [int(x) for x in args.layers.split(",")]
@@ -276,12 +282,12 @@ def main():
     print(f"Model:     {profile['model_id']}")
     print(f"Layers:    {layers}")
     print(f"N layers:  {profile['n_layers']}")
+    print(f"Pool:      {pool_strategy}")
     print(f"Model tag: {model_tag or '(none — 8B compat)'}")
     print(f"Max examples per class per dataset: {N_PAIRS_PER_DATASET}")
     print(f"Datasets:  {len(FACTORIAL_DATASETS)}")
     print()
 
-    # ---- data ----
     all_datasets = load_all_factorial_datasets()
 
     if args.dry_run:
@@ -295,12 +301,10 @@ def main():
                 print(f"  {behavior.upper():4s} {ds_name:30s}  pos={pos:4d}  neg={neg:4d}")
         return
 
-    # ---- model ----
     model, tokenizer = load_model_and_tokenizer(profile)
     special_ids = build_special_token_set(tokenizer)
     print(f"Special token IDs to skip: {special_ids}")
 
-    # ---- extraction ----
     # Structure: directions[behavior][layer] = aggregated direction tensor
     directions: Dict[str, Dict[int, torch.Tensor]] = {}
     per_dataset_directions: Dict[str, Dict[int, Dict[str, torch.Tensor]]] = {}
@@ -309,9 +313,7 @@ def main():
 
     for behavior in BEHAVIOR_NAMES:
         label_key = BEHAVIOR_CONFIGS[behavior]["label_key"]
-        print(f"\n{'='*60}")
         print(f"Extracting {behavior.upper()} (label: {label_key})")
-        print(f"{'='*60}")
 
         per_dataset_directions[behavior] = {l: {} for l in layers}
         per_dataset_counts[behavior] = {l: {} for l in layers}
@@ -330,9 +332,10 @@ def main():
                 model, tokenizer, filtered, label_key, layers, special_ids,
                 max_examples=N_PAIRS_PER_DATASET,
                 desc=f"  {ds_name}",
+                pool_strategy=pool_strategy,
             )
 
-            for l in layersw
+            for l in layers:
                 if dir_by_layer[l] is not None:
                     dataset_dirs_by_layer[l].append(dir_by_layer[l])
                     per_dataset_directions[behavior][l][ds_name] = dir_by_layer[l]
@@ -348,7 +351,6 @@ def main():
             directions[behavior][l] = agg
             svd_variance[behavior][l] = var_exp
 
-    # ---- AUROC validation ----
     all_data = []
     for ds_data in all_datasets.values():
         all_data.extend(ds_data)
@@ -372,6 +374,7 @@ def main():
             model, tokenizer, directions[behavior],
             val_subset, label_key, layers, special_ids,
             n_samples=min(VALIDATION_SAMPLES, len(val_subset)),
+            pool_strategy=pool_strategy,
         )
         auroc_results[behavior] = aurocs
         directions[behavior] = aligned  # sign-aligned
@@ -380,7 +383,6 @@ def main():
             status = "✓" if aurocs[l] >= MIN_AUROC_THRESHOLD else "⚠"
             print(f"  {behavior.upper()} layer {l}: AUROC = {aurocs[l]:.4f} {status}")
 
-    # ---- orthogonality ----
     for l in layers:
         print(f"\nOrthogonality (layer {l}):")
         ortho = check_orthogonality(directions, l)
@@ -388,9 +390,9 @@ def main():
         print(f"  SyA-SyPr cosine: {ortho['sya_sypr']:+.4f}")
         print(f"  GA-SyPr cosine:  {ortho['ga_sypr']:+.4f}")
 
-    # ---- save ----
-    os.makedirs(str(DIRECTIONS_DIR), exist_ok=True)
-    print(f"\nSaving directions to {DIRECTIONS_DIR}/")
+    save_dir = get_directions_dir(model_tag)
+    os.makedirs(str(save_dir), exist_ok=True)
+    print(f"\nSaving directions to {save_dir}/")
 
     for behavior in BEHAVIOR_NAMES:
         for l in layers:
@@ -399,8 +401,8 @@ def main():
             total_neg = sum(c[1] for c in counts.values())
             total_examples = total_pos + total_neg
 
-            fname = direction_filename(behavior, l, total_examples, model_tag)
-            filepath = DIRECTIONS_DIR / fname
+            fname = direction_filename(behavior, l, total_examples)
+            filepath = save_dir / fname
 
             direction_data = {
                 "direction": directions[behavior][l],
@@ -417,13 +419,14 @@ def main():
                 "auroc": auroc_results[behavior][l],
                 "svd_variance_explained": svd_variance[behavior][l],
                 "method": "label_based_diffmean_svd",
-                "pool_strategy": "pre_eos",
+                "pool_strategy": pool_strategy,
             }
             torch.save(direction_data, str(filepath))
             print(f"  Saved: {fname}")
 
     print("SUMMARY")
     print(f"Model: {profile['model_id']}")
+    print(f"Pool strategy: {pool_strategy}")
     print(f"Datasets aggregated: {len(all_datasets)}")
 
     header = f"{'Behavior':<8}"

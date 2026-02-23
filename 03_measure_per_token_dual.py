@@ -22,7 +22,6 @@ from pathlib import Path
 from config import (
     MODEL_ID,
     DEFAULT_MEASURE_LAYER,
-    DIRECTIONS_DIR,
     MAX_NEW_TOKENS,
 )
 
@@ -44,12 +43,14 @@ def find_direction_file(behavior: str, layer: int, directions_dir: Path) -> Path
     pattern = f"{behavior}_layer{layer}_*.pt"
     matches = list(directions_dir.glob(pattern))
     if not matches:
-        raise FileNotFoundError(f"No direction file for {behavior} layer {layer}")
+        raise FileNotFoundError(f"No direction file for {behavior} layer {layer} in {directions_dir}")
     return max(matches, key=lambda p: p.stat().st_mtime)
 
 
-def load_directions(layer: int, directions_dir: Path = DIRECTIONS_DIR) -> Dict[str, dict]:
+def load_directions(layer: int, directions_dir: Path = None, model_tag: str = "8b") -> Dict[str, dict]:
     """Load direction files for all behaviors."""
+    if directions_dir is None:
+        directions_dir = get_directions_dir(model_tag)
     directions = {}
     for behavior in BEHAVIORS:
         filepath = find_direction_file(behavior, layer, directions_dir)

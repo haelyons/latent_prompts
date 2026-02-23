@@ -24,6 +24,14 @@ MODEL_PROFILES = {
         "candidate_layers": [55, 60, 65],
         "device_map": "auto",  # 2-GPU sharding via accelerate
     },
+    "3.3-70b": {
+        "model_id": "meta-llama/Llama-3.3-70B-Instruct",
+        "n_layers": 80,
+        "hidden_dim": 8192,
+        "extraction_layer": 60,
+        "candidate_layers": [55, 60, 65],
+        "device_map": "auto",
+    },
 }
 
 def get_profile(name: str = "8b") -> dict:
@@ -55,7 +63,6 @@ FACTORIAL_DATASETS = [
 # Additional data paths
 PRAISE_DATA_PATH = DISENTANGLE_DATA_PATH / "praise.json"
 TRUTHFULQA_PATH = DISENTANGLE_DATA_PATH / "truthfulqa.jsonl"
-
 
 BEHAVIORS = {
     "sya": {
@@ -93,8 +100,12 @@ BEHAVIOR_LABEL_MAP = {
 
 DIRECTIONS_DIR = Path("directions")
 
-# Individual direction files pattern: {behavior}_layer{layer}_n{count}_svd.pt
-# ex: sya_layer24_n1k3_svd.pt, ga_layer24_n1k3_svd.pt, sypr_layer24_n1k3_svd.pt
+
+def get_directions_dir(model_tag: str = "") -> Path:
+    """Get model-specific directions subdirectory."""
+    if not model_tag or model_tag == "8b":
+        return DIRECTIONS_DIR / "8b"
+    return DIRECTIONS_DIR / model_tag
 
 VALIDATION_SPLIT = 0.2  # 20% holdout for AUROC validation
 MIN_AUROC_THRESHOLD = 0.6  # warn if direction AUROC is below this

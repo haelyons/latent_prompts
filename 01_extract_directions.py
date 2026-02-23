@@ -64,7 +64,7 @@ DTYPE = torch.bfloat16
 LAYERS = [EXTRACTION_LAYER]
 
 DATA_DIR = FACTORIAL_DATA_DIR
-OUTPUT_DIR = str(DIRECTIONS_DIR)
+OUTPUT_DIR = str(get_directions_dir("8b"))
 
 POOL_STRATEGY = "pre_eos"
 

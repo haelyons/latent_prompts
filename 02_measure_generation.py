@@ -46,7 +46,7 @@ def find_direction_file(behavior: str, layer: int, directions_dir: Path) -> Path
     return max(matches, key=lambda p: p.stat().st_mtime)
 
 
-def load_directions(layer: int, directions_dir: Path = DIRECTIONS_DIR) -> Dict[str, dict]:
+def load_directions(layer: int, directions_dir: Path = None) -> Dict[str, dict]:
     """
     Load individual direction files for each behavior.
     
@@ -57,6 +57,8 @@ def load_directions(layer: int, directions_dir: Path = DIRECTIONS_DIR) -> Dict[s
             - 'auroc': validation AUROC score
             - 'metadata': full saved dict
     """
+    if directions_dir is None:
+        directions_dir = get_directions_dir("8b")
     directions = {}
     
     for behavior in ["sya", "ga", "sypr"]:

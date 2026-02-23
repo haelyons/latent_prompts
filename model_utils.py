@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Union
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from config import DIRECTIONS_DIR
+from config import get_directions_dir
 
-POOL_STRATEGY = "pre_eos"
+POOL_STRATEGY = "eos"
 
 def load_model_and_tokenizer(profile: dict):
     """
@@ -56,14 +56,23 @@ def find_pool_position(
     """
     Find the token position to extract the activation from.
 
-    'pre_eos': last token before the final EOS, skipping special tokens.
-    'last':    last non-special token.
-
-    Matches the logic in 01_extract_directions.get_pooled_activation and
-    03_measure_per_token_dual.find_measurement_position.
+    Strategies:
+        'eos':     The EOS token itself (k=0). Paper's Appendix F validates this
+                   as the optimal site: "EOS activations integrate the semantics
+                   of the entire response."  Falls back to last token if no EOS.
+        'pre_eos': Token immediately before the final EOS (k=1), skipping
+                   special tokens. Legacy default from 01_extract_directions.
+        'last':    Last non-special token in the sequence.
     """
     ids = input_ids[0] if input_ids.dim() > 1 else input_ids
     seq_len = len(ids)
+
+    if strategy == "eos":
+        eos_positions = (ids == eos_id).nonzero(as_tuple=True)[0]
+        if len(eos_positions) > 0:
+            return eos_positions[-1].item()
+        # No EOS found — fall back to last token
+        return seq_len - 1
 
     if strategy == "pre_eos":
         eos_positions = (ids == eos_id).nonzero(as_tuple=True)[0]
@@ -71,7 +80,7 @@ def find_pool_position(
             idx = eos_positions[-1].item() - 1
         else:
             idx = seq_len - 1
-    else:
+    else:  # 'last'
         idx = seq_len - 1
 
     while idx > 0 and ids[idx].item() in special_ids:
@@ -173,13 +182,11 @@ def get_pooled_activations(
 
 BEHAVIOR_NAMES = ["sya", "ga", "sypr"]
 
-def direction_filename(behavior: str, layer: int, n_examples: int, model_tag: str = "") -> str:
+def direction_filename(behavior: str, layer: int, n_examples: int) -> str:
     """
     Build a direction filename.
-    model_tag is e.g. '70b' — omitted for 8B to preserve backward compat.
+    Model identity is handled by the parent directory (e.g. directions/3.3-70b/).
     """
-    prefix = f"{behavior}_{model_tag}_" if model_tag else f"{behavior}_"
-
     if n_examples >= 1000:
         thousands = n_examples // 1000
         hundreds = (n_examples % 1000) // 100
@@ -187,46 +194,55 @@ def direction_filename(behavior: str, layer: int, n_examples: int, model_tag: st
     else:
         count_str = str(n_examples)
 
-    return f"{prefix}layer{layer}_n{count_str}_svd.pt"
+    return f"{behavior}_layer{layer}_n{count_str}_svd.pt"
 
 
 def find_direction_file(
     behavior: str,
     layer: int,
-    directions_dir: Path = DIRECTIONS_DIR,
+    directions_dir: Path = None,
     model_tag: str = "",
 ) -> Path:
-    """Find the most recent direction file matching behavior, layer, and optional model tag."""
-    if model_tag:
-        pattern = f"{behavior}_{model_tag}_layer{layer}_*.pt"
-    else:
-        pattern = f"{behavior}_layer{layer}_*.pt"
+    """
+    Find the most recent direction file matching behavior and layer.
+    
+    Model identity is resolved via directory: pass directions_dir explicitly
+    (e.g. directions/3.3-70b/) or provide model_tag to auto-resolve.
+    """
+    if directions_dir is None:
+        directions_dir = get_directions_dir(model_tag)
 
+    pattern = f"{behavior}_layer{layer}_*.pt"
     matches = list(directions_dir.glob(pattern))
     if not matches:
         raise FileNotFoundError(
-            f"No direction file for {behavior} layer {layer} "
-            f"(model_tag={model_tag!r}) in {directions_dir}"
+            f"No direction file for {behavior} layer {layer} in {directions_dir}"
         )
     return max(matches, key=lambda p: p.stat().st_mtime)
 
 
 def load_directions(
     layers: List[int],
-    directions_dir: Path = DIRECTIONS_DIR,
+    directions_dir: Path = None,
     model_tag: str = "",
 ) -> Dict[str, Dict[int, dict]]:
     """
     Load direction files for all behaviors and layers.
 
+    Pass directions_dir explicitly (e.g. directions/3.3-70b/) or provide
+    model_tag to auto-resolve via get_directions_dir().
+
     Returns:
         {behavior: {layer: {"direction": Tensor, "auroc": float, ...}}}
     """
+    if directions_dir is None:
+        directions_dir = get_directions_dir(model_tag)
+
     directions: Dict[str, Dict[int, dict]] = {}
     for behavior in BEHAVIOR_NAMES:
         directions[behavior] = {}
         for layer in layers:
-            filepath = find_direction_file(behavior, layer, directions_dir, model_tag)
+            filepath = find_direction_file(behavior, layer, directions_dir)
             saved = torch.load(str(filepath), weights_only=False)
             directions[behavior][layer] = saved
             auroc = saved.get("auroc", 0)
