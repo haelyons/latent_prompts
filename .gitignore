@@ -2,3 +2,8 @@ _old/
 __pycache__/
 latent-env/
 .env
+logs/
+out/
+*.log
+.ipynb_checkpoints/
+*:Zone.Identifier
