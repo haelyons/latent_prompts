@@ -134,7 +134,7 @@ Some observations:
 
 Research interpretation:
 
-- This demonstrates a case where the model's training on scientific consensus dominates over framing effects
-- Per Kissane et al. (2024), "Base LLMs Refuse Too," base models already have strong priors on factual matters—fine-tuning reinforces rather than creates these tendencies
+- This demonstrates a case where the model's training on scientific consensus dominates over framing effects - this might be because of the explicitly false nature of astrology being a strong target for any anti-"conspiracy" training
+- Per Kissane et al. (2024), "Base LLMs Refuse Too," base models already have strong priors on factual matters, fine-tuning reinforces rather than creates these tendencies 
 - The low SyA activation suggests the prompt doesn't trigger the "user has incorrect belief" circuit strongly
 
