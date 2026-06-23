@@ -1,6 +1,6 @@
 ## "SycophantSee" Prompt and Completion Activation Monitoring
 
-*This work was done as part of the Apart Research "AI Manipulation Hackathon" and presented in the AIMII workshop for IASEAI in Paris '26* 
+*This work was done as part of the Apart Research "AI Manipulation Hackathon" and presented in the AIMII workshop for IASEAI in Paris '26. See the final presented poster [here](https://docs.google.com/presentation/d/1k5T_Iip0a38yW4_f_XkDF71X_m-kUmWyrwCJ2_8sCvU/edit?usp=sharing).*
 
 We extract sycophancy-related directions (SyA sycophantic agreement, GA genuine agreement, SyPr sycophantic praise) from Llama model activations following [Vennemeyer et al. (2025)](https://arxiv.org/abs/2509.21305), then test whether these directions predict actual sycophantic behavior and downstream fragility.
 
